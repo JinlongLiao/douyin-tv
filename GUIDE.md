@@ -1,219 +1,140 @@
-# 抖音TV应用 - 编译和安装指南
+# 编译、安装与排障指南
 
-## 📱 项目简介
+## 适用范围
 
-这是一个专为Android TV设计的抖音客户端应用,通过WebView嵌入抖音网页,实现在智能电视上浏览和播放抖音视频。
+本文对应 1.0.19 开发验证版本。默认链路为 `SplashActivity → EmbeddedBrowserActivity → GeckoView`，最低和目标系统均为 Android 11 / API 30。旧 `MainActivity` 系统 WebView 路径保留在仓库中，不是默认启动入口。
 
-## ✨ 核心功能
+当前已复现卸载重装后的深色空白页，尚未完成根因定位；本文的可编译、可安装不等同于首页和播放验收通过。
 
-### 已实现功能
-- ✅ **完整网页嵌入**: 嵌入抖音官方网页 https://www.douyin.com/
-- ✅ **电视遥控器支持**: 完整适配电视遥控器操作
-- ✅ **自动播放下一个**: 视频播放完毕自动跳转到下一个视频
-- ✅ **账号登录持久化**: Cookie自动保存,支持持久化登录
-- ✅ **大屏优化**: 针对电视大屏优化显示效果
-- ✅ **流畅播放**: 硬件加速,视频播放流畅
+## 工具链
 
-### 遥控器操作说明
-| 按键 | 功能 |
-|------|------|
-| **方向键上** | 切换到上一个视频 |
-| **方向键下** | 切换到下一个视频 |
-| **方向键左** | 向左滚动 |
-| **方向键右** | 向右滚动 |
-| **确认键/OK** | 播放/暂停当前视频 |
-| **返回键** | 返回上一页 |
-| **菜单键** | 显示抖音菜单 |
+首次安装工具、配置跨平台环境和排查编译错误，先阅读[完整编译说明](编译说明.md)；本指南侧重安装、运行和电视排障。
 
-## 🔧 编译环境要求
+| 工具 | 版本或要求 |
+| --- | --- |
+| JDK | CI 17；现场 JDK 21，Java / Kotlin 字节码目标 17 |
+| Gradle Wrapper | 9.3.1 |
+| Android Gradle Plugin | 9.1.1 |
+| Kotlin | 2.4.20，AGP 内置 Kotlin |
+| SDK Platform | `platforms;android-37.0` |
+| Build Tools | `build-tools;36.0.0` |
+| ADB | `platform-tools` |
+| Node.js | 现场使用 24，运行内置 `node:test` 测试 |
 
-### 必需环境
-- **Java JDK**: 17 或更高版本
-- **Android SDK**: 已安装 Android SDK (推荐使用 Android Studio)
-- **Gradle**: 8.0+ (项目已包含 Gradle Wrapper,无需单独安装)
+配置 `JAVA_HOME`、`ANDROID_HOME`，或在不入库的 `local.properties` 中设置 `sdk.dir`。首次依赖解析需要访问 Google、Maven Central、Mozilla Maven；离线构建只适用于依赖与 SDK 已缓存的环境。
 
-### 检查环境
-```powershell
-# 检查 Java 版本
+```bash
+sdkmanager "platforms;android-37.0" "build-tools;36.0.0" "platform-tools"
 java -version
-
-# 检查环境变量
-echo $env:JAVA_HOME
-echo $env:ANDROID_HOME
+./gradlew --version
+./gradlew assembleDebug testDebugUnitTest lintDebug
+node --test tests/*.test.cjs
+./gradlew assembleRelease
 ```
 
-## 📦 编译步骤
+Windows 将 `./gradlew` 改为 `.\gradlew.bat`。APK 输出目录为 `app/build/outputs/apk/debug/` 和 `app/build/outputs/apk/release/`。
 
-### 方法1: 使用编译脚本 (推荐)
-```powershell
-# 在项目根目录执行
-.\build.bat
+`ExpiredTargetSdkVersion` 在本项目 lint 中为警告，因为目标设备基线明确为 API 30 侧载；这不表示满足应用商店的目标 API 要求。其他 lint 检查保持默认。
+
+## 签名与 ARM64 现场包
+
+默认 debug 签名与项目 release 签名不同，只有同签名包才能覆盖原安装。现场测试曾复用项目 release 签名，并限制为 `arm64-v8a`；默认 Wrapper 命令不包含这个临时覆盖，包体与现场包可能不同。
+
+需要复现该构建时，将以下内容保存为仓库外的 `tv-debug.init.gradle`，例如 macOS / Linux 的 `/tmp/tv-debug.init.gradle`：
+
+```groovy
+gradle.beforeProject { project ->
+    project.plugins.withId('com.android.application') {
+        project.androidComponents.finalizeDsl { android ->
+            android.buildTypes.debug.signingConfig = android.signingConfigs.release
+            android.defaultConfig.ndk.abiFilters.clear()
+            android.defaultConfig.ndk.abiFilters.add('arm64-v8a')
+        }
+    }
+}
 ```
 
-### 方法2: 使用 Gradle 命令
-```powershell
-# 编译 Release 版本
-.\gradlew assembleRelease
-
-# 编译 Debug 版本
-.\gradlew assembleDebug
-
-# 清理构建
-.\gradlew clean
+```bash
+./gradlew -I /tmp/tv-debug.init.gradle assembleDebug testDebugUnitTest lintDebug
 ```
 
-### 编译输出位置
-- **Release APK**: `app\build\outputs\apk\release\app-release.apk`
-- **Debug APK**: `app\build\outputs\apk\debug\app-debug.apk`
+这仍是可调试 APK，不能因使用 release 签名就称为正式发行构建。现场 ARM64 包约 208 MB，默认多 ABI 包可能更大。不要使用不相同的签名包测试“保留登录升级”。
 
-## 📲 安装步骤
+## ADB 安装和启动
 
-### 在Android TV上安装
+按电视提供的方式开启 ADB。Android 11 无线调试若提供配对端口，先配对，再连接调试端口；若电视使用传统 ADB，则按其实际地址和端口连接。
 
-#### 方法1: 使用U盘安装
-1. 将编译好的 APK 文件拷贝到 U盘
-2. U盘插入电视的 USB 接口
-3. 打开电视的文件管理器
-4. 找到 APK 文件并点击安装
-5. 允许"安装未知来源应用"
-
-#### 方法2: 使用ADB安装
-```powershell
-# 连接电视(确保电视和电脑在同一局域网)
-adb connect 电视IP地址:5555
-
-# 安装APK
-adb install app\build\outputs\apk\release\app-release.apk
+```bash
+adb pair TV_IP:PAIR_PORT
+adb connect TV_IP:DEBUG_PORT
+adb devices -l
+adb -s SERIAL install -r app/build/outputs/apk/release/app-release.apk
+adb -s SERIAL shell am start -n com.douyin.tv/.SplashActivity
 ```
 
-### 首次使用
-1. 打开"抖音TV"应用
-2. 等待页面加载
-3. 使用遥控器登录抖音账号
-4. 开始浏览和观看视频
+`PAIR_PORT` 与 `DEBUG_PORT` 可能不同，不能固定都用 5555。使用 U 盘安装时通过电视文件管理器选择 APK，并按系统提示允许安装来源。
 
-## 🎯 使用技巧
+全新安装使用 `adb -s SERIAL uninstall com.douyin.tv`，然后安装并启动；卸载会清除资料。覆盖升级、清数据、卸载重装是不同测试场景，记录时必须区分。
 
-### 账号登录
-- 首次打开需要登录抖音账号
-- 登录信息会自动保存(Cookie持久化)
-- 下次打开无需重新登录
+## 默认内核和浏览器身份
 
-### 视频观看
-- 视频会自动播放
-- 播放完毕后自动切换到下一个视频
-- 使用遥控器确认键可暂停/播放
+- APK 内置 GeckoView `158.0.20261007201254`，不更新或切换系统 WebView provider。
+- 浏览器使用独立持久化 profile；不继承旧系统 WebView Cookie。
+- 默认 UA 为 Android 11 平板兼容身份，Chrome 83 是兼容标记，实际执行内核仍为 GeckoView 158。
+- Firefox 平板 UA 在历史测试中被分流到下载页；较新 Chrome 兼容标记没有减少主要脚本体积，所以没有据此修改默认 UA。
+- 手机端展示的设备类型还需重新登录后验证，不能仅凭 UA 字符串承诺服务端会如何分类。
 
-### 网络要求
-- 建议连接 WiFi 网络
-- 需要稳定的网络连接以获得最佳体验
+调试构建允许通过启动参数对照 UA；正式构建不使用该调试覆盖。正常使用从电视图标或 `SplashActivity` 进入即可。
 
-## 🛠️ 技术架构
+## 遥控和播放控制
 
-### 技术栈
-- **开发语言**: Kotlin
-- **UI框架**: Android WebView
-- **电视适配**: AndroidX Leanback
-- **最低支持**: Android 5.0 (API 21)
-- **目标版本**: Android 14 (API 34)
+完整键位见 [QUICKSTART.md](QUICKSTART.md)。方向移动与普通确认点击走原生鼠标事件；播放控制通过内置扩展适配网页。网页繁忙时原生光标与菜单仍能独立绘制，但实际点击或播放命令仍可能等待网页处理。
 
-### 核心组件
-- `MainActivity.kt`: 主Activity,包含WebView和遥控器逻辑
-- `WebViewClient`: 处理页面加载和URL拦截
-- `WebChromeClient`: 处理进度和JS对话框
-- `JavascriptInterface`: JS与Android交互桥梁
+自动模式切换保存进入播放前的状态，不会因为重复的播放通知覆盖快照。返回先关闭登录弹窗、退出播放器，再处理网页历史；主页面第一次提示，2 秒内再按才退出。找不到播放器关闭按钮时保留页面并提示。
 
-### 关键特性实现
+进度条在快进退时显示四秒，普通时间更新不延长显示时间。未知时长或尚未就绪的视频可能无法快进；站点未提供相邻视频时不能保证切换成功。
 
-#### 1. 自动播放下一个视频
-通过注入JavaScript代码监听video标签的ended事件,当视频播放结束时自动触发切换。
+## 空白和加载异常排查
 
-#### 2. Cookie持久化
-使用CookieManager自动保存和恢复Cookie,实现登录状态持久化。
+先记录版本、覆盖升级还是全新安装、电视型号、系统版本、当前画面和已执行的操作，不先清数据或更换系统内核。
 
-#### 3. 电视遥控器适配
-重写onKeyDown方法,将遥控器按键映射到相应的网页操作。
-
-#### 4. 大屏优化
-- 设置User Agent为PC版
-- 注入CSS优化显示效果
-- 启用硬件加速
-
-## ⚠️ 注意事项
-
-### 兼容性说明
-- 本应用依赖抖音网页版,如抖音网页更新可能影响部分功能
-- 部分电视设备可能需要ROOT权限才能安装第三方应用
-- 建议在Android 7.0+系统上使用以获得最佳体验
-
-### 已知限制
-- 部分交互功能可能不如原生应用流畅
-- 网页加载速度取决于网络状况
-- 某些特殊功能可能无法使用
-
-### 隐私安全
-- 应用仅嵌入抖音官方网页
-- 不收集或上传任何用户数据
-- 登录凭证仅保存在本地设备
-
-## 🔍 故障排查
-
-### 编译失败
-```powershell
-# 清理并重新编译
-.\gradlew clean
-.\gradlew assembleRelease
+```bash
+adb -s SERIAL shell dumpsys package com.douyin.tv
+adb -s SERIAL shell pidof com.douyin.tv
+adb -s SERIAL shell dumpsys activity activities
+adb -s SERIAL logcat -d --pid=APP_PID -s DouyinGecko:V GeckoConsole:E AndroidRuntime:E
+adb -s SERIAL exec-out screencap -p > tv-screen.png
 ```
 
-### 无法连接网络
-- 检查AndroidManifest.xml中的网络权限
-- 确保电视已连接网络
+用 `pidof` 得到的新 PID 替换 `APP_PID`。退出并重新进入、重装或进程崩溃后需要重新核对，不能把旧进程日志当成当前页面状态。
 
-### 视频无法播放
-- 检查网络连接
-- 清除应用数据后重新登录
+- 仅有光标、深色背景和顶部进度不算进入首页。
+- `onPageStop(success=true)` 表示导航完成，扩展 `ready` 表示控制通道已建立；都不能代替实际页面内容检查。
+- 需要核对实际 URL、页面标题、可见站点提示、视频卡片和播放器状态。空白原因尚未明确时不要直接归因于网络、账号或无障碍。
+- 检查期间暂停遥控器操作可避免页面被退出；排查结束应明确恢复正常操作。
 
-### 无法安装APK
-- 确保电视已允许"安装未知来源应用"
-- 检查APK文件是否完整
+## 性能诊断
 
-## 📝 版本信息
+调试构建在扩展就绪后进行一次八秒采样，也可从原生菜单选择“诊断：采样当前页面”。结果写入应用日志和私有 `cache/browser-performance.json`；旧文件可能来自前一次采样，应核对 `sampleStartedAt`、UA、视口和可见性。
 
-- **应用版本**: 1.0
-- **版本号**: 1
-- **包名**: com.douyin.tv
-- **最小SDK**: 21 (Android 5.0)
-- **目标SDK**: 34 (Android 14)
-
-## 📄 项目结构
-
-```
-douyin-tv/
-├── app/
-│   ├── src/
-│   │   └── main/
-│   │       ├── AndroidManifest.xml
-│   │       ├── java/com/douyin/tv/
-│   │       │   └── MainActivity.kt
-│   │       └── res/
-│   │           ├── drawable/
-│   │           ├── mipmap/
-│   │           └── values/
-│   ├── build.gradle
-│   └── proguard-rules.pro
-├── gradle/
-├── build.gradle
-├── settings.gradle
-├── gradle.properties
-├── gradlew
-├── gradlew.bat
-└── build.bat
+```bash
+adb -s SERIAL shell run-as com.douyin.tv cat cache/browser-performance.json
 ```
 
-## 🤝 贡献
+`run-as` 需要可调试包。指标包括帧回调、帧间隔、100 ms 事件循环计时的调度延迟、视频缓冲和解码帧。计时器仅在 probe 内运行，结束会清理。`longTaskSupported=false` 时，零计数不代表没有长任务；调度延迟也不等同于 LongTask 时长。
 
-如果您发现问题或有改进建议,欢迎提交Issue或Pull Request。
+需要浏览器调试时，调试包提供本机 socket：
 
-## 📜 免责声明
+```bash
+adb -s SERIAL forward tcp:9224 localabstract:com.douyin.tv/firefox-debugger-socket
+```
 
-本项目仅供学习交流使用,不得用于商业用途。抖音及相关商标归北京字节跳动科技有限公司所有。
+这是 Mozilla RDP，不是 Chromium CDP。页面已关闭时可能没有 tab；`evaluationResult` 中的异常位置 `frame` 不能误当作网页目标。使用采样器时还要区分 profiler 自身开销、标记墙钟跨度和被采样函数的实际 CPU 开销。
+
+详细数据和测试边界见[诊断报告](电视流畅性诊断与内置内核验证.md)。
+
+## 发布与验收
+
+仓库现有 workflow 在 `main` / `master` 推送或手动运行时，会自动改版本、构建、推送标签并创建正式 GitHub Release。源码提交不等同于实机验收；本次已知空白问题尚未解决，提交标记 `[skip ci]` 避免自动发布，本地验证不省略。
+
+发布前至少验证全新安装可进首页、登录完成、光标点击、列表滚动、进退全屏、上下切视频、快进进度条、连续返回退出和同签名升级后的资料保留。当前这些条目尚未全部通过。

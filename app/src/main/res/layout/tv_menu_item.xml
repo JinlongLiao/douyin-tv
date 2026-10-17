@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 原生电视菜单行：大点击区、清晰文字和圆角选择反馈。 -->
+<TextView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@android:id/text1"
+    android:layout_width="match_parent"
+    android:layout_height="52dp"
+    android:background="@drawable/tv_menu_item_selector"
+    android:gravity="center_vertical"
+    android:paddingStart="20dp"
+    android:paddingEnd="20dp"
+    android:textColor="#F3F5FA"
+    android:textSize="18sp" />

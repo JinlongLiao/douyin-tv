@@ -62,8 +62,8 @@ object WebViewOptimizer {
             allowContentAccess = true
             textZoom = 100
             minimumFontSize = 12
-            // 统一 UA，减少浏览器指纹检测导致的页面兼容性问题
-            userAgentString = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            // 使用真实 Android 系统与内核版本，只移除手机标识以提供平板身份。
+            userAgentString = BrowserIdentity.createTabletUserAgent(WebSettings.getDefaultUserAgent(context))
 
             // 低配设备优化
             if (deviceLevel == DeviceLevel.LOW) {

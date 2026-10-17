@@ -15,4 +15,14 @@
         <item name="android:windowIsTranslucent">false</item>
         <item name="android:windowAnimationStyle">@null</item>
     </style>
+    <!-- 只覆盖原生操作菜单，不改变网页或系统输入法主题。 -->
+    <style name="ThemeOverlay.DouyinTV.Menu" parent="ThemeOverlay.AppCompat.Dialog.Alert">
+        <item name="android:colorBackground">#161823</item>
+        <item name="android:textColorPrimary">#F3F5FA</item>
+        <item name="android:textColorSecondary">#BBC1CE</item>
+        <item name="colorAccent">#FE2C55</item>
+        <item name="android:windowBackground">@drawable/tv_menu_background</item>
+        <item name="android:windowMinWidthMajor">44%</item>
+        <item name="android:windowMinWidthMinor">70%</item>
+    </style>
 </resources>

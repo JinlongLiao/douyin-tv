@@ -1,5 +1,24 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android">
-    <solid android:color="@color/primary" />
-    <corners android:radius="8dp" />
-</shape>
+<!-- Android TV 桌面横幅，与启动图标保持相同视觉标识。 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp" android:height="180dp"
+    android:viewportWidth="320" android:viewportHeight="180">
+    <path android:fillColor="@color/launcher_background" android:pathData="M0,0H320V180H0Z" />
+    <group android:scaleX="2" android:scaleY="2" android:translateX="52" android:translateY="-18">
+        <group android:translateX="-1.8" android:translateY="1.8">
+            <path android:fillColor="#25F4EE" android:fillType="evenOdd" android:pathData="M32,30H76Q82,30 82,36V66Q82,72 76,72H32Q26,72 26,66V36Q26,30 32,30ZM32,34Q30,34 30,36V66Q30,68 32,68H76Q78,68 78,66V36Q78,34 76,34Z" />
+            <path android:fillColor="#25F4EE" android:fillType="evenOdd" android:pathData="M57,40H62C62,44 65,47 69,47V52C66,52 64,51 62,50V59C62,64 58,67 53,66C48,65 46,60 49,56C51,54 54,54 57,55V40ZM57,60C57,58 54,57 53,59C51,61 54,63 56,61Z" />
+            <path android:fillColor="#25F4EE" android:fillType="evenOdd" android:pathData="M51,72H57V77H64V81H44V77H51Z" />
+        </group>
+        <group android:translateX="1.8" android:translateY="-1.8">
+            <path android:fillColor="#FE2C55" android:fillType="evenOdd" android:pathData="M32,30H76Q82,30 82,36V66Q82,72 76,72H32Q26,72 26,66V36Q26,30 32,30ZM32,34Q30,34 30,36V66Q30,68 32,68H76Q78,68 78,66V36Q78,34 76,34Z" />
+            <path android:fillColor="#FE2C55" android:fillType="evenOdd" android:pathData="M57,40H62C62,44 65,47 69,47V52C66,52 64,51 62,50V59C62,64 58,67 53,66C48,65 46,60 49,56C51,54 54,54 57,55V40ZM57,60C57,58 54,57 53,59C51,61 54,63 56,61Z" />
+            <path android:fillColor="#FE2C55" android:fillType="evenOdd" android:pathData="M51,72H57V77H64V81H44V77H51Z" />
+        </group>
+        <group android:translateX="0" android:translateY="0">
+            <path android:fillColor="#FFFFFF" android:fillType="evenOdd" android:pathData="M32,30H76Q82,30 82,36V66Q82,72 76,72H32Q26,72 26,66V36Q26,30 32,30ZM32,34Q30,34 30,36V66Q30,68 32,68H76Q78,68 78,66V36Q78,34 76,34Z" />
+            <path android:fillColor="#FFFFFF" android:fillType="evenOdd" android:pathData="M57,40H62C62,44 65,47 69,47V52C66,52 64,51 62,50V59C62,64 58,67 53,66C48,65 46,60 49,56C51,54 54,54 57,55V40ZM57,60C57,58 54,57 53,59C51,61 54,63 56,61Z" />
+            <path android:fillColor="#FFFFFF" android:fillType="evenOdd" android:pathData="M51,72H57V77H64V81H44V77H51Z" />
+        </group>
+    </group>
+</vector>

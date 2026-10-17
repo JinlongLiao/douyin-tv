@@ -1,18 +1,20 @@
 plugins {
     id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
 }
 
 android {
     namespace 'com.douyin.tv'
-    compileSdk 34
+    // 编译 API 37；最低支持和目标行为均以 Android 11 电视（API 30）为基准。
+    compileSdk {
+        version = release(37)
+    }
 
     defaultConfig {
         applicationId "com.douyin.tv"
-        minSdk 21
-        targetSdk 34
-        versionCode 12
-        versionName "1.0.11"
+        minSdk 30
+        targetSdk 30
+        versionCode 20
+        versionName "1.0.19"
         
         // 电视应用标识
         manifestPlaceholders = [isTV: true]
@@ -39,17 +41,21 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-    
-    kotlinOptions {
-        jvmTarget = '17'
+
+    lint {
+        // 用户指定 API 30 电视侧载基线；保留 Play 目标版本提示为警告，其余检查保持默认。
+        warning 'ExpiredTargetSdkVersion'
     }
-    
+
     buildFeatures {
         viewBinding false
     }
 }
 
 dependencies {
+    // 独立随 APK 发布的稳定内核，不使用电视上的系统 WebView。
+    implementation 'org.mozilla.geckoview:geckoview:158.0.20261007201254'
+    testImplementation 'junit:junit:4.13.2'
     implementation 'androidx.core:core-ktx:1.12.0'
     implementation 'androidx.appcompat:appcompat:1.6.1'
     implementation 'com.google.android.material:material:1.11.0'
@@ -67,4 +73,11 @@ dependencies {
     // Lifecycle
     implementation 'androidx.lifecycle:lifecycle-runtime-ktx:2.7.0'
     implementation 'androidx.lifecycle:lifecycle-viewmodel-ktx:2.7.0'
+}
+
+// Java 与 Kotlin 统一生成 JVM 17 字节码，由 Android 工具链转换为设备可执行的 DEX。
+kotlin {
+    compilerOptions {
+        jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17
+    }
 }

@@ -1,0 +1,30 @@
+/* 共用电视焦点和全屏样式，保持视频比例并避免改变网站普通布局。 */
+* { cursor: none !important; }
+*:focus { outline: none !important; }
+video:-webkit-full-screen,
+video:fullscreen {
+    width: 100vw !important;
+    height: 100vh !important;
+    object-fit: contain !important;
+    background: #000;
+}
+video.tv-pseudo-fullscreen-video {
+    position: fixed !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    max-width: none !important;
+    max-height: none !important;
+    object-fit: contain !important;
+    background: #000 !important;
+    z-index: 2147483646 !important;
+}
+body.tv-video-fullscreen-active {
+    overflow: hidden !important;
+}
+body.tv-video-fullscreen-active #tv-hl-box {
+    display: none !important;
+}

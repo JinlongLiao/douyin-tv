@@ -47,6 +47,14 @@
             </intent-filter>
         </activity>
         
+        <!-- 内置新内核验证入口，仍由应用自己的启动 Activity 路由。 -->
+        <activity
+            android:name=".EmbeddedBrowserActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
+            android:exported="false"
+            android:screenOrientation="landscape"
+            android:windowSoftInputMode="stateUnspecified|adjustResize" />
+
         <!-- 主Activity -->
         <activity
             android:name=".MainActivity"

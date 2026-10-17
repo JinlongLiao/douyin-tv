@@ -28,3 +28,7 @@ build/
 *.keystore
 !debug.keystore
 !douyin-tv-release.keystore
+
+# Kotlin 2.x 本地构建缓存
+.kotlin/
+/.codegraph/

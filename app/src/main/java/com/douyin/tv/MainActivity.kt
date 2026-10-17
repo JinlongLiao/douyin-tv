@@ -2,10 +2,13 @@ package com.douyin.tv
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import android.content.SharedPreferences
 import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
+import android.os.SystemClock
+import android.view.Gravity
 import android.util.Log
 import android.view.KeyEvent
 import android.view.MotionEvent
@@ -19,13 +22,13 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.annotation.RequiresApi
+import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.douyin.tv.utils.CookieHelper
 import com.douyin.tv.utils.WebViewOptimizer
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainActivity : AppCompatActivity() {
@@ -33,6 +36,8 @@ class MainActivity : AppCompatActivity() {
     private lateinit var webView: WebView
     private lateinit var progressBar: ProgressBar
     private lateinit var loadingText: TextView
+    /** 保存全屏回调控制器，兼容 API 21，避免调用 API 26 才提供的 getter。 */
+    private lateinit var douyinWebChromeClient: DouyinWebChromeClient
     private lateinit var cookieManager: CookieManager
     private lateinit var prefs: SharedPreferences
 
@@ -40,6 +45,8 @@ class MainActivity : AppCompatActivity() {
     private val tag = "DouyinTV"
 
     // 按键控制
+    // 仅限制同一按键的长按重复，不吞掉快速切换方向或返回。
+    private var lastRemoteKeyCode = KeyEvent.KEYCODE_UNKNOWN
     private var lastKeyEventTime = 0L
     private val KEY_DEBOUNCE_MS = 120L
 
@@ -59,9 +66,6 @@ class MainActivity : AppCompatActivity() {
     // 登录状态监控
     private var loginCheckJob: Job? = null
 
-    // 内存监控
-    private val MEMORY_THRESHOLD_MB = 100
-
     private var overlayId = -1
     private var overlay: FrameLayout? = null
     private var customVideoView: View? = null
@@ -74,6 +78,7 @@ class MainActivity : AppCompatActivity() {
         try {
             setupLayout()
             setupWebView()
+            setupRemoteBackNavigation()
             setupCookieManager()
             setupLoadingUI()
             prefs = getSharedPreferences("douyin_tv_prefs", Context.MODE_PRIVATE)
@@ -121,20 +126,20 @@ class MainActivity : AppCompatActivity() {
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
     }
 
+    /** 创建叠放的网页和进度条，加载遮罩由 setupLoadingUI 加入同一容器。 */
     private fun setupLayout() {
-        val rootLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT
+        // 网页、进度条和加载遮罩叠放，避免遮罩作为纵向子项挤占网页高度。
+        val rootLayout = FrameLayout(this).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
             )
         }
 
         webView = WebView(this).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                1f
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
             )
             // 让 WebView 稳定持有 TV 焦点，再把遥控器按键统一交给 Activity 处理。
             isFocusable = true
@@ -146,9 +151,10 @@ class MainActivity : AppCompatActivity() {
         }
 
         progressBar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                8
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                (3 * resources.displayMetrics.density).toInt(),
+                Gravity.TOP
             )
             max = 100
             visibility = View.GONE
@@ -161,6 +167,7 @@ class MainActivity : AppCompatActivity() {
         webView.requestFocus()
     }
 
+    /** 在网页上方显示居中的加载提示，隐藏时不改变网页尺寸。 */
     private fun setupLoadingUI() {
         overlayId = View.generateViewId()
         overlay = FrameLayout(this).apply {
@@ -176,7 +183,8 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             layoutParams = FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                Gravity.CENTER
             )
             gravity = android.view.Gravity.CENTER
         }
@@ -223,35 +231,19 @@ class MainActivity : AppCompatActivity() {
     @SuppressLint("SetJavaScriptEnabled")
     private fun setupWebView() {
         try {
+            // 调试构建允许通过 ADB 检查真实 DOM 和性能，发布构建不开放调试。
+            WebView.setWebContentsDebuggingEnabled(
+                applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+            )
             WebViewOptimizer.optimizeForTV(webView, applicationContext)
             webView.webViewClient = DouyinWebViewClient()
-            webView.webChromeClient = DouyinWebChromeClient()
+            douyinWebChromeClient = DouyinWebChromeClient()
+            webView.webChromeClient = douyinWebChromeClient
             webView.addJavascriptInterface(VideoJsInterface(), "AndroidInterface")
             setupTouchHandler()
-            setupMemoryMonitor()
         } catch (e: Exception) {
             Log.e(tag, "setupWebView error", e)
             throw RuntimeException("WebView初始化失败", e)
-        }
-    }
-
-    private fun setupMemoryMonitor() {
-        lifecycleScope.launch {
-            while (isActive) {
-                delay(30000)
-                checkMemoryUsage()
-            }
-        }
-    }
-
-    private fun checkMemoryUsage() {
-        val runtime = Runtime.getRuntime()
-        val usedMemory = (runtime.totalMemory() - runtime.freeMemory()) / (1024 * 1024)
-        if (usedMemory > MEMORY_THRESHOLD_MB) {
-            Log.d(tag, "High memory usage: ${usedMemory}MB, triggering cleanup")
-            webView.post {
-                try { webView.clearCache(false) } catch (e: Exception) { Log.e(tag, "clearCache error", e) }
-            }
         }
     }
 
@@ -294,16 +286,6 @@ class MainActivity : AppCompatActivity() {
     inner class DouyinWebViewClient : WebViewClient() {
         override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
 
-        override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? {
-            if (WebViewOptimizer.getDeviceLevel(this@MainActivity) == WebViewOptimizer.DeviceLevel.LOW) {
-                val url = request?.url?.toString() ?: return null
-                if (url.contains("ad") || url.contains("analytics") || url.contains("tracking")) {
-                    return WebResourceResponse("text/plain", "utf-8", null)
-                }
-            }
-            return null
-        }
-
         @RequiresApi(Build.VERSION_CODES.M)
         override fun onReceivedError(view: WebView?, request: WebResourceRequest?, error: WebResourceError?) {
             super.onReceivedError(view, request, error)
@@ -327,7 +309,6 @@ class MainActivity : AppCompatActivity() {
             webViewReady = false
             pageLoadAttempts = 0
             showLoadingMessage("正在加载抖音...")
-            try { injectAntiDetectionScript() } catch (e: Exception) { Log.e(tag, "injectAntiDetectionScript error", e) }
         }
 
         override fun onPageFinished(view: WebView?, url: String?) {
@@ -338,15 +319,12 @@ class MainActivity : AppCompatActivity() {
             try {
                 CookieHelper.saveCookies(this@MainActivity, douyinUrl)
                 cookieManager.flush()
-                injectAntiDetectionScript()
                 injectAutoPlayScript()
                 injectCaptchaSupport()
                 injectLoginDetectionScript()
                 injectTVOptimizationCSS()
                 checkLoginStatus()
-                lifecycleScope.launch {
-                    delay(3000); initFocusEngine()
-                }
+                initFocusEngine()
             } catch (e: Exception) {
                 Log.e(tag, "onPageFinished error", e)
             }
@@ -428,21 +406,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun injectAntiDetectionScript() {
-        val script = """
-            (function() {
-                try { Object.defineProperty(navigator, 'webdriver', { get: () => false }); } catch(e) {}
-                try { Object.defineProperty(navigator, 'platform', { get: () => 'Win32' }); } catch(e) {}
-                try { window.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} }; } catch(e) {}
-                try { Object.defineProperty(navigator, 'maxTouchPoints', { get: () => 0 }); } catch(e) {}
-            })();
-        """.trimIndent()
-        webView.evaluateJavascript(script, null)
-    }
-
     private fun injectCaptchaSupport() {
         val script = """
             (function() {
+                // SPA 回调可能重复触发，同一文档只注册一组监听器和定时器。
+                if (window.__tvCaptchaInstalled) return;
+                window.__tvCaptchaInstalled = true;
                 function createTouch(target, x, y) {
                     try {
                         return new Touch({
@@ -503,6 +472,9 @@ class MainActivity : AppCompatActivity() {
     private fun injectAutoPlayScript() {
         val script = """
             (function() {
+                // SPA 回调可能重复触发，同一文档只注册一组监听器和定时器。
+                if (window.__tvAutoPlayInstalled) return;
+                window.__tvAutoPlayInstalled = true;
                 function ensureSoundEnabled(video) {
                     try {
                         video.muted = false;
@@ -550,6 +522,9 @@ class MainActivity : AppCompatActivity() {
     private fun injectLoginDetectionScript() {
         val script = """
             (function() {
+                // SPA 回调可能重复触发，同一文档只注册一组监听器和定时器。
+                if (window.__tvLoginDetectionInstalled) return;
+                window.__tvLoginDetectionInstalled = true;
                 let hasNotifiedLogin = false;
                 function checkLoginModal() {
                     const loginModal = document.querySelector('[class*="login-modal"]') ||
@@ -596,7 +571,10 @@ class MainActivity : AppCompatActivity() {
                     }
                     video.tv-pseudo-fullscreen-video {
                         position: fixed !important;
-                        inset: 0 !important;
+                        top: 0 !important;
+                        left: 0 !important;
+                        right: 0 !important;
+                        bottom: 0 !important;
                         width: 100vw !important;
                         height: 100vh !important;
                         max-width: none !important;
@@ -611,10 +589,6 @@ class MainActivity : AppCompatActivity() {
                     body.tv-video-fullscreen-active #tv-hl-box {
                         display: none !important;
                     }
-                    *, *::before, *::after {
-                        animation-duration: 0.01ms !important;
-                        transition-duration: 0.05ms !important;
-                    }
                 `;
                 document.head.appendChild(style);
             })();
@@ -622,45 +596,46 @@ class MainActivity : AppCompatActivity() {
         webView.evaluateJavascript(css, null)
     }
 
-    /**
-     * 拦截方向键（仅DPAD/OK），其他键正常传递。BACK 不拦截，避免阻断系统退出。
-     */
+    /** 统一接管遥控器事件；未识别的按键继续交给系统。 */
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
-        if (handleRemoteKey(event.keyCode, event)) return true
-        if (event.action == KeyEvent.ACTION_DOWN) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT,
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER -> {
-                    return onKeyDown(event.keyCode, event)
-                }
-                // BACK 走默认流程，由 Activity 的 onKeyDown 处理
-            }
-        } else if (event.action == KeyEvent.ACTION_UP) {
-            when (event.keyCode) {
-                KeyEvent.KEYCODE_DPAD_UP,
-                KeyEvent.KEYCODE_DPAD_DOWN,
-                KeyEvent.KEYCODE_DPAD_LEFT,
-                KeyEvent.KEYCODE_DPAD_RIGHT,
-                KeyEvent.KEYCODE_DPAD_CENTER,
-                KeyEvent.KEYCODE_ENTER -> {
-                    return true
-                }
-            }
-        }
-        return super.dispatchKeyEvent(event)
+        return handleRemoteKey(event.keyCode, event) || super.dispatchKeyEvent(event)
     }
 
+    /** 返回依次退出视频全屏、回退网页、关闭应用，同时支持系统返回回调。 */
+    private fun setupRemoteBackNavigation() {
+        onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+            override fun handleOnBackPressed() {
+                webView.evaluateJavascript(
+                    "Boolean(window.__tvFocus && window.__tvFocus.dismissModal())"
+                ) { dismissed ->
+                    if (dismissed != "true" && !tryExitVideoFullscreen()) {
+                        if (webView.canGoBack()) webView.goBack() else finish()
+                    }
+                }
+            }
+        })
+    }
+
+    /** 消费方向和媒体按键序列，同键长按按间隔节流；返回由系统回调处理。 */
     private fun handleRemoteKey(keyCode: Int, event: KeyEvent): Boolean {
         if (!isRemoteNavigationKey(keyCode)) return false
         if (event.action == KeyEvent.ACTION_UP) return true
         if (event.action != KeyEvent.ACTION_DOWN) return false
+        // 返回交给 AndroidX 返回回调，不参与遥控器重复按键节流。
+        // 确认、菜单和媒体动作只响应首次按下，避免长按反复开关弹窗或播放状态。
+        if (event.repeatCount > 0 && keyCode !in listOf(
+                KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN,
+                KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT
+            )) return true
+        val currentTime = SystemClock.uptimeMillis()
+        if (event.repeatCount > 0 && keyCode == lastRemoteKeyCode &&
+            currentTime - lastKeyEventTime < KEY_DEBOUNCE_MS) return true
+        lastRemoteKeyCode = keyCode
+        lastKeyEventTime = currentTime
         return handleRemoteKeyDown(keyCode)
     }
 
+    /** 识别由应用处理的方向、确认、菜单和媒体键。 */
     private fun isRemoteNavigationKey(keyCode: Int): Boolean {
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP,
@@ -669,7 +644,6 @@ class MainActivity : AppCompatActivity() {
             KeyEvent.KEYCODE_DPAD_RIGHT,
             KeyEvent.KEYCODE_DPAD_CENTER,
             KeyEvent.KEYCODE_ENTER,
-            KeyEvent.KEYCODE_BACK,
             KeyEvent.KEYCODE_MENU,
             KeyEvent.KEYCODE_SETTINGS,
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE,
@@ -679,22 +653,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    /** 把已通过节流的遥控器按下事件映射到网页操作。 */
     private fun handleRemoteKeyDown(keyCode: Int): Boolean {
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastKeyEventTime < KEY_DEBOUNCE_MS) return true
-        lastKeyEventTime = currentTime
-
         return when (keyCode) {
             KeyEvent.KEYCODE_DPAD_UP -> { focusEngineNavigate(0, -1); true }
             KeyEvent.KEYCODE_DPAD_DOWN -> { focusEngineNavigate(0, 1); true }
             KeyEvent.KEYCODE_DPAD_LEFT -> { focusEngineNavigate(-1, 0); true }
             KeyEvent.KEYCODE_DPAD_RIGHT -> { focusEngineNavigate(1, 0); true }
             KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { focusEngineAction(); true }
-            KeyEvent.KEYCODE_BACK -> {
-                if (tryExitVideoFullscreen()) true
-                else if (webView.canGoBack()) { webView.goBack(); true }
-                else false
-            }
             KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SETTINGS -> { handleMenuKey(); true }
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { toggleVideoPlayPause(); true }
             KeyEvent.KEYCODE_MEDIA_PLAY -> { playVideo(); true }
@@ -703,704 +669,12 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        val currentTime = System.currentTimeMillis()
-        if (currentTime - lastKeyEventTime < KEY_DEBOUNCE_MS) return true
-        lastKeyEventTime = currentTime
-
-        when (keyCode) {
-            KeyEvent.KEYCODE_DPAD_UP -> { focusEngineNavigate(0, -1); return true }
-            KeyEvent.KEYCODE_DPAD_DOWN -> { focusEngineNavigate(0, 1); return true }
-            KeyEvent.KEYCODE_DPAD_LEFT -> { focusEngineNavigate(-1, 0); return true }
-            KeyEvent.KEYCODE_DPAD_RIGHT -> { focusEngineNavigate(1, 0); return true }
-            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> { focusEngineAction(); return true }
-            KeyEvent.KEYCODE_BACK -> {
-                // 优先：尝试退出全屏 → 内部页面回退 → 系统默认（退出App）
-                tryExitVideoFullscreen()
-                if (webView.canGoBack()) {
-                    webView.goBack()
-                    return true
-                }
-                // 返回 false 让系统处理 BACK（退出App）
-                return false
-            }
-            KeyEvent.KEYCODE_MENU, KeyEvent.KEYCODE_SETTINGS -> { handleMenuKey(); return true }
-            KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { toggleVideoPlayPause(); return true }
-            KeyEvent.KEYCODE_MEDIA_PLAY -> { playVideo(); return true }
-            KeyEvent.KEYCODE_MEDIA_PAUSE -> { pauseVideo(); return true }
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    /**
-     * TV 焦点引擎：2D 空间最近邻导航
-     */
+    /** 注入网页空间焦点引擎，跟踪动态控件并为遥控器提供可视高亮。 */
     private fun initFocusEngine() {
         if (!webViewReady) return
-        val script = """
-            (function() {
-                console.log('[TV] initFocusEngine called');
-                if (window.__tvFocus) {
-                    try { window.__tvFocus.cleanup(); } catch(e) {}
-                }
-                var TV = window.__tvFocus = {};
-
-                // 高亮框
-                var oldHl = document.getElementById('tv-hl-box');
-                if (oldHl) oldHl.remove();
-                var hl = document.createElement('div');
-                hl.id = 'tv-hl-box';
-                hl.style.cssText = [
-                    'position:fixed','top:0','left:0','width:0','height:0',
-                    'border:4px solid #FE2C55','border-radius:8px',
-                    'box-shadow:0 0 16px rgba(254,44,85,1)',
-                    'pointer-events:none','z-index:2147483647',
-                    'transition:transform 0.15s ease-out, width 0.15s, height 0.15s',
-                    'display:none','background:transparent','box-sizing:border-box',
-                    'transform:translate(0,0)','will-change:transform,width,height'
-                ].join(';');
-                document.body.appendChild(hl);
-                TV.hl = hl;
-
-                // 状态提示
-                var oldLabel = document.getElementById('tv-hl-label');
-                if (oldLabel) oldLabel.remove();
-                var label = document.createElement('div');
-                label.id = 'tv-hl-label';
-                label.style.cssText = [
-                    'position:fixed','top:8px','left:50%','transform:translateX(-50%)',
-                    'background:rgba(254,44,85,0.95)','color:#fff','padding:5px 14px',
-                    'border-radius:14px','font-size:13px','z-index:2147483647',
-                    'pointer-events:none','display:none','font-family:sans-serif',
-                    'max-width:70vw','white-space:nowrap','overflow:hidden',
-                    'text-overflow:ellipsis','font-weight:bold'
-                ].join(';');
-                document.body.appendChild(label);
-                TV.label = label;
-
-                function showLabel(text) {
-                    label.textContent = text;
-                    label.style.display = 'block';
-                    clearTimeout(TV.labelTimer);
-                    TV.labelTimer = setTimeout(function() { label.style.display = 'none'; }, 1500);
-                }
-
-                // 元素可见性 - 阈值降低
-                function isVisible(el) {
-                    if (!el || !document.body.contains(el)) return false;
-                    var r = el.getBoundingClientRect();
-                    if (r.width < 10 || r.height < 10) return false;
-                    if (r.bottom < 0 || r.top > window.innerHeight) return false;
-                    if (r.right < 0 || r.left > window.innerWidth) return false;
-                    var st = window.getComputedStyle(el);
-                    if (st.display === 'none' || st.visibility === 'hidden' || st.opacity === '0') return false;
-                    return true;
-                }
-
-                function makeItem(el, type, name, actionEl, videoEl) {
-                    var r = el.getBoundingClientRect();
-                    return {
-                        el: el, actionEl: actionEl || el, videoEl: videoEl || null, type: type,
-                        name: (name || '').toString().trim().substring(0, 30),
-                        x: r.left + r.width / 2,
-                        y: r.top + r.height / 2,
-                        l: r.left, t: r.top,
-                        r: r.right, b: r.bottom,
-                        w: r.width, h: r.height
-                    };
-                }
-
-                function centerOf(el) {
-                    var r = el.getBoundingClientRect();
-                    return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: r };
-                }
-
-                function fireRemoteClick(el) {
-                    if (!el) return false;
-                    var c = centerOf(el);
-                    var opts = { bubbles:true, cancelable:true, composed:true, view:window, clientX:c.x, clientY:c.y };
-                    try { el.focus && el.focus({ preventScroll:true }); } catch(e) {}
-                    ['pointerdown','mousedown','pointerup','mouseup','click'].forEach(function(type) {
-                        try {
-                            var ev = type.indexOf('pointer') === 0 && window.PointerEvent
-                                ? new PointerEvent(type, Object.assign({ pointerId:1, pointerType:'mouse', isPrimary:true }, opts))
-                                : new MouseEvent(type, opts);
-                            el.dispatchEvent(ev);
-                        } catch(e) {}
-                    });
-                    try { el.click(); } catch(e) {}
-                    return true;
-                }
-
-                function getActionTarget(el) {
-                    if (!el) return null;
-                    return el.closest('a[href],button,[role="button"],[role="tab"],[tabindex]') ||
-                           el.querySelector('a[href],button,[role="button"],[role="tab"],[tabindex]') ||
-                           el;
-                }
-
-                function getPrimaryVideo() {
-                    var best = null;
-                    var bestScore = 0;
-                    document.querySelectorAll('video').forEach(function(v) {
-                        var r = v.getBoundingClientRect();
-                        if (r.width < 80 || r.height < 80 || r.bottom < 0 || r.top > window.innerHeight) return;
-                        var visibleW = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0));
-                        var visibleH = Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
-                        var score = visibleW * visibleH;
-                        if (score > bestScore) { bestScore = score; best = v; }
-                    });
-                    return best;
-                }
-
-                function findVideoForElement(el) {
-                    if (!el) return null;
-                    var direct = el.querySelector && el.querySelector('video');
-                    if (direct) return direct;
-                    var card = el.closest('[data-aweme-id], article, [class*="feed"], [class*="card"], [class*="video"], [class*="item"], [class*="Item"]');
-                    if (card) {
-                        var nested = card.querySelector && card.querySelector('video');
-                        if (nested) return nested;
-                    }
-                    var targetRect = el.getBoundingClientRect();
-                    var minOverlap = Math.max(1600, targetRect.width * targetRect.height * 0.18);
-                    var best = null, bestOverlap = 0;
-                    document.querySelectorAll('video').forEach(function(v) {
-                        var r = v.getBoundingClientRect();
-                        if (r.width < 80 || r.height < 80 || r.bottom < 0 || r.top > window.innerHeight) return;
-                        var overlapW = Math.max(0, Math.min(r.right, targetRect.right) - Math.max(r.left, targetRect.left));
-                        var overlapH = Math.max(0, Math.min(r.bottom, targetRect.bottom) - Math.max(r.top, targetRect.top));
-                        var overlap = overlapW * overlapH;
-                        if (overlap > bestOverlap && overlap >= minOverlap) {
-                            bestOverlap = overlap;
-                            best = v;
-                        }
-                    });
-                    return best;
-                }
-
-                function enterPseudoFullscreen(video) {
-                    document.querySelectorAll('video.tv-pseudo-fullscreen-video').forEach(function(v) {
-                        if (v !== video) v.classList.remove('tv-pseudo-fullscreen-video');
-                    });
-                    video.classList.add('tv-pseudo-fullscreen-video');
-                    document.body.classList.add('tv-video-fullscreen-active');
-                    try { AndroidInterface.onVideoFullscreenChanged(true); } catch(e) {}
-                    try { video.scrollIntoView({ block:'center', inline:'center' }); } catch(e) {}
-                }
-
-                function pauseOtherVideos(activeVideo) {
-                    document.querySelectorAll('video').forEach(function(v) {
-                        if (v !== activeVideo) {
-                            try { v.pause(); } catch(e) {}
-                            try { v.preload = 'none'; } catch(e) {}
-                        }
-                    });
-                }
-
-                function playFullscreenVideo(video) {
-                    if (!video) return false;
-                    pauseOtherVideos(video);
-                    try { video.muted = false; video.volume = 1; } catch(e) {}
-                    try { video.preload = 'auto'; } catch(e) {}
-                    try {
-                        var playResult = video.play();
-                        if (playResult && playResult.catch) playResult.catch(function(){});
-                    } catch(e) {}
-                    try {
-                        if (video.requestFullscreen) video.requestFullscreen();
-                        else if (video.webkitRequestFullscreen) video.webkitRequestFullscreen();
-                    } catch(e) {}
-                    enterPseudoFullscreen(video);
-                    return true;
-                }
-
-                function openItem(item) {
-                    var target = getActionTarget(item.actionEl || item.el);
-                    var beforeHref = location.href;
-                    var targetHref = target && target.getAttribute ? (target.getAttribute('href') || '') : '';
-                    fireRemoteClick(target);
-                    setTimeout(function() {
-                        if (targetHref && location.href === beforeHref) {
-                            try { location.href = targetHref; } catch(e) {}
-                        }
-                    }, 120);
-                    setTimeout(function() {
-                        var changed = location.href !== beforeHref;
-                        var videoPage = location.href.indexOf('/video/') > -1 || location.href.indexOf('/note/') > -1;
-                        if (!changed && !videoPage) return;
-                        var v = getPrimaryVideo();
-                        if (v) playFullscreenVideo(v);
-                    }, 1200);
-                }
-
-                function playNextVideo(currentVideo) {
-                    gather();
-                    var currentIndex = -1;
-                    if (TV.current) currentIndex = TV.items.indexOf(TV.current);
-                    if (currentIndex < 0 && currentVideo) {
-                        for (var i = 0; i < TV.items.length; i++) {
-                            if (TV.items[i].videoEl === currentVideo || findVideoForElement(TV.items[i].el) === currentVideo) {
-                                currentIndex = i;
-                                break;
-                            }
-                        }
-                    }
-                    var next = null;
-                    for (var j = Math.max(0, currentIndex + 1); j < TV.items.length; j++) {
-                        if (TV.items[j].type === 'video') { next = TV.items[j]; break; }
-                    }
-                    if (!next) {
-                        window.scrollBy({ top: window.innerHeight * 0.85, behavior: 'auto' });
-                        setTimeout(function() {
-                            gather();
-                            var videos = TV.items.filter(function(i) { return i.type === 'video'; });
-                            if (videos.length > 0) {
-                                TV.current = videos[0];
-                                drawBox();
-                                var v = TV.current.videoEl || findVideoForElement(TV.current.el);
-                                if (v) playFullscreenVideo(v); else openItem(TV.current);
-                            }
-                        }, 700);
-                        return 'scroll-next';
-                    }
-                    TV.current = next;
-                    try { next.el.scrollIntoView({ block:'center', inline:'nearest' }); } catch(e) {}
-                    setTimeout(function() {
-                        drawBox();
-                        var v = next.videoEl || findVideoForElement(next.el);
-                        if (v) playFullscreenVideo(v); else openItem(next);
-                    }, 150);
-                    return 'next';
-                }
-                TV.playNextVideo = playNextVideo;
-
-                // 缓存：仅在 DOM 变化时刷新
-                var gatherVersion = 0;
-                var lastGatherTime = 0;
-                function gather() {
-                    var items = [];
-                    var seen = new Set();
-                    function add(el, type, name, actionEl, videoEl) {
-                        if (!el || seen.has(el) || !isVisible(el)) return;
-                        seen.add(el);
-                        items.push(makeItem(el, type, name, actionEl, videoEl));
-                    }
-                    // 视频卡片：先找 [data-aweme-id] 容器内的 <a>（实际可点击的链接元素）
-                    document.querySelectorAll('[data-aweme-id]').forEach(function(el) {
-                        var link = el.querySelector('a');
-                        var target = el;
-                        var video = el.querySelector('video');
-                        var titleEl = el.querySelector('.z72L2AHI') ||
-                                      el.querySelector('[class*="title"]') ||
-                                      el.querySelector('img[alt]') ||
-                                      el.querySelector('[class*="desc"]');
-                        var name = titleEl ?
-                            (titleEl.textContent || titleEl.getAttribute('alt') || '视频').trim() : '视频';
-                        add(target, 'video', name, link || el, video);
-                    });
-                    document.querySelectorAll('[data-e2e*="feed"], [class*="feed"] a[href], [class*="video"] a[href], [class*="card"] a[href]').forEach(function(link) {
-                        var href = link.getAttribute('href') || '';
-                        var text = (link.textContent || link.getAttribute('aria-label') || '').trim();
-                        if (href.indexOf('/video/') < 0 && href.indexOf('/note/') < 0 && text.length === 0) return;
-                        var titleEl = link.querySelector('img[alt]') || link.querySelector('[class*="title"]') || link.querySelector('[class*="desc"]');
-                        var name = titleEl ? (titleEl.textContent || titleEl.getAttribute('alt') || text || '视频').trim() : (text || '视频');
-                        var card = link.closest('[data-aweme-id], article, [class*="feed"], [class*="card"], [class*="video"], [class*="item"], [class*="Item"]') || link;
-                        var video = card.querySelector && card.querySelector('video');
-                        add(card, 'video', name, link, video);
-                    });
-                    // 兜底：用 <a> 内有 /video/ 或 /note/ 路径的链接（无需 data-aweme-id）
-                    if (items.length === 0) {
-                        document.querySelectorAll('a[href*="/video/"], a[href*="/note/"]').forEach(function(link) {
-                            if (!isVisible(link)) return;
-                            var r = link.getBoundingClientRect();
-                            if (r.width < 10 || r.height < 10) return;
-                            if (seen.has(link)) return;
-                            seen.add(link);
-                            var container = link.closest('[data-aweme-id]') ||
-                                            link.closest('article') ||
-                                            link.closest('[class*="feed"], [class*="card"], [class*="video"], [class*="item"], [class*="Item"]') ||
-                                            link;
-                            var titleEl = link.querySelector('img[alt]') || link.querySelector('[class*="title"]') || link.querySelector('[class*="desc"]');
-                            var name = titleEl ?
-                                (titleEl.textContent || titleEl.getAttribute('alt') || '视频').trim() : '视频';
-                            var actionCard = container || link;
-                            var video = actionCard.querySelector && actionCard.querySelector('video');
-                            items.push(makeItem(actionCard, 'video', name, link, video));
-                        });
-                    }
-                    // 顶部 tab：支持 role="tab" 以及半糖 UI 组件的 tab
-                    document.querySelectorAll('[role="tab"]').forEach(function(el) {
-                        var name = (el.textContent || '').trim();
-                        if (name) add(el, 'toptab', name);
-                    });
-                    document.querySelectorAll('[aria-selected], [data-e2e*="tab"], nav a, header a').forEach(function(el) {
-                        var name = (el.textContent || el.getAttribute('aria-label') || '').trim();
-                        if (name && name.length < 20) add(el, 'toptab', name);
-                    });
-                    // 兜底：顶部导航链接（.semi-tabs-tab 类名的 tab 元素）
-                    if (items.filter(function(i){return i.type==='toptab'}).length === 0) {
-                        document.querySelectorAll('.semi-tabs-tab, .web-nav-wrapper a, .NavBar-Container a, [class*="nav"] a, [class*="Nav"] a').forEach(function(el) {
-                            var name = (el.textContent || el.getAttribute('aria-label') || '').trim();
-                            if (name && name.length < 20) add(el, 'toptab', name);
-                        });
-                    }
-                    // 左侧菜单：.tab-discover 包裹的 <a>（不是 .tab-discover div 本身）
-                    document.querySelectorAll('.tab-discover a').forEach(function(link) {
-                        var nameEl = link.querySelector('.Ou5DxC0w') || link.querySelector('span');
-                        var name = nameEl ? nameEl.textContent.trim() : (link.textContent.trim() || '菜单');
-                        add(link, 'leftnav', name);
-                    });
-                    // 兜底：左侧导航链接
-                    if (items.filter(function(i){return i.type==='leftnav'}).length === 0) {
-                        document.querySelectorAll('.sidebar-container a, [class*="Sidebar"] a, [class*="side-nav"] a, aside a, [class*="menu"] a, [class*="Menu"] a').forEach(function(el) {
-                            var name = (el.textContent || el.getAttribute('aria-label') || '').trim();
-                            if (name && name.length < 20) add(el, 'leftnav', name);
-                        });
-                    }
-
-                    TV.items = items;
-                    var vCount = items.filter(function(i){return i.type==='video'}).length;
-                    var tCount = items.filter(function(i){return i.type==='toptab'}).length;
-                    var lCount = items.filter(function(i){return i.type==='leftnav'}).length;
-                    if (vCount !== TV._lastVideoCount || tCount !== TV._lastTabCount || lCount !== TV._lastNavCount) {
-                        gatherVersion++;
-                        TV._lastVideoCount = vCount;
-                        TV._lastTabCount = tCount;
-                        TV._lastNavCount = lCount;
-                        console.log('[TV] gather v' + gatherVersion + ': video=' + vCount + ' tab=' + tCount + ' nav=' + lCount);
-                    }
-                    return items.length;
-                }
-                TV.refresh = gather;
-
-                // 轻量版 gather：只更新 current 坐标，不重新查询 DOM
-                function gatherLight() {
-                    if (!TV.items) return;
-                    var changed = false;
-                    for (var i = 0; i < TV.items.length; i++) {
-                        var it = TV.items[i];
-                        if (!it.el || !document.body.contains(it.el)) continue;
-                        var r = it.el.getBoundingClientRect();
-                        if (r.width === 0 || r.height === 0) continue;
-                        var nx = r.left + r.width / 2;
-                        var ny = r.top + r.height / 2;
-                        if (Math.abs(nx - it.x) > 2 || Math.abs(ny - it.y) > 2) {
-                            it.x = nx; it.y = ny;
-                            it.l = r.left; it.t = r.top;
-                            it.r = r.right; it.b = r.bottom;
-                            it.w = r.width; it.h = r.height;
-                            changed = true;
-                        }
-                    }
-                    if (changed) gatherVersion++;
-                    return gatherVersion;
-                }
-                TV.gatherLight = gatherLight;
-
-                function drawBox() {
-                    if (!TV.current) { hl.style.display = 'none'; return; }
-                    var el = TV.current.el;
-                    if (!el || !document.body.contains(el)) { hl.style.display = 'none'; return; }
-                    var r = el.getBoundingClientRect();
-                    if (r.width < 5 || r.height < 5) { hl.style.display = 'none'; return; }
-                    // 实时更新 current 的坐标
-                    TV.current.x = r.left + r.width / 2;
-                    TV.current.y = r.top + r.height / 2;
-                    TV.current.l = r.left; TV.current.t = r.top;
-                    TV.current.r = r.right; TV.current.b = r.bottom;
-                    TV.current.w = r.width; TV.current.h = r.height;
-                    hl.style.display = 'block';
-                    hl.style.width = (r.width + 8) + 'px';
-                    hl.style.height = (r.height + 8) + 'px';
-                    hl.style.transform = 'translate(' + (r.left - 4) + 'px,' + (r.top - 4) + 'px)';
-                    var typeLabel = { leftnav:'菜单', toptab:'分类', video:'视频' };
-                    showLabel('▶ ' + (typeLabel[TV.current.type] || '') + ': ' + TV.current.name);
-                }
-                TV.draw = drawBox;
-
-                // 2D 空间最近邻：在 (dx,dy) 方向找最近元素
-                // 用扇形权重：方向上的距离 + 偏离方向的距离 * 2
-                function findGridNeighbor(cur, dx, dy) {
-                    if (!TV.items || TV.items.length === 0 || !cur || !cur.el) return null;
-                    var curR = cur.el.getBoundingClientRect();
-                    var cx = curR.left + curR.width / 2;
-                    var cy = curR.top + curR.height / 2;
-                    var curArea = Math.max(1, curR.width * curR.height);
-                    var best = null;
-                    var bestScore = Infinity;
-                    for (var i = 0; i < TV.items.length; i++) {
-                        var it = TV.items[i];
-                        if (it.el === cur.el || !document.body.contains(it.el)) continue;
-                        var r = it.el.getBoundingClientRect();
-                        if (r.width < 10 || r.height < 10) continue;
-                        var ix = r.left + r.width / 2;
-                        var iy = r.top + r.height / 2;
-                        var primary = 0, secondary = 0, overlap = 0, overlapRatio = 0, gap = 0;
-                        if (dx > 0) {
-                            gap = r.left - curR.right;
-                            if (gap < -Math.min(80, curR.width * 0.18) && ix <= cx) continue;
-                            primary = Math.max(0, gap);
-                            secondary = Math.abs(iy - cy);
-                            overlap = Math.max(0, Math.min(r.bottom, curR.bottom) - Math.max(r.top, curR.top));
-                            overlapRatio = overlap / Math.max(1, Math.min(r.height, curR.height));
-                        } else if (dx < 0) {
-                            gap = curR.left - r.right;
-                            if (gap < -Math.min(80, curR.width * 0.18) && ix >= cx) continue;
-                            primary = Math.max(0, gap);
-                            secondary = Math.abs(iy - cy);
-                            overlap = Math.max(0, Math.min(r.bottom, curR.bottom) - Math.max(r.top, curR.top));
-                            overlapRatio = overlap / Math.max(1, Math.min(r.height, curR.height));
-                        } else if (dy > 0) {
-                            gap = r.top - curR.bottom;
-                            if (gap < -Math.min(80, curR.height * 0.22) && iy <= cy) continue;
-                            primary = Math.max(0, gap);
-                            secondary = Math.abs(ix - cx);
-                            overlap = Math.max(0, Math.min(r.right, curR.right) - Math.max(r.left, curR.left));
-                            overlapRatio = overlap / Math.max(1, Math.min(r.width, curR.width));
-                        } else if (dy < 0) {
-                            gap = curR.top - r.bottom;
-                            if (gap < -Math.min(80, curR.height * 0.22) && iy >= cy) continue;
-                            primary = Math.max(0, gap);
-                            secondary = Math.abs(ix - cx);
-                            overlap = Math.max(0, Math.min(r.right, curR.right) - Math.max(r.left, curR.left));
-                            overlapRatio = overlap / Math.max(1, Math.min(r.width, curR.width));
-                        }
-                        var sizePenalty = Math.abs((r.width * r.height) - curArea) / curArea * 10;
-                        var typeBonus = it.type === cur.type ? -30 : 20;
-                        var score = primary * 2 + secondary * (overlapRatio > 0.18 ? 0.55 : 1.25) - overlapRatio * 180 + sizePenalty + typeBonus;
-                        if (score < bestScore) {
-                            bestScore = score;
-                            best = it;
-                        }
-                    }
-                    return best;
-                }
-                TV.findGridNeighbor = findGridNeighbor;
-
-                function findNearestInDirection(cur, dx, dy) {
-                    if (!TV.items || TV.items.length === 0) return null;
-                    // 实时刷新 cur 位置
-                    var curR = cur.el.getBoundingClientRect();
-                    var cx = curR.left + curR.width / 2;
-                    var cy = curR.top + curR.height / 2;
-
-                    var best = null;
-                    var bestScore = Infinity;
-
-                    for (var i = 0; i < TV.items.length; i++) {
-                        var it = TV.items[i];
-                        if (it.el === cur.el) continue;
-                        if (!document.body.contains(it.el)) continue;
-                        var r = it.el.getBoundingClientRect();
-                        if (r.width === 0 || r.height === 0) continue;
-                        var ix = r.left + r.width / 2;
-                        var iy = r.top + r.height / 2;
-                        var ddx = ix - cx;
-                        var ddy = iy - cy;
-
-                        // 方向过滤：只需轻微偏移
-                        if (dy > 0) {
-                            if (ddy < curR.height * 0.15) continue;
-                        } else if (dy < 0) {
-                            if (ddy > -curR.height * 0.15) continue;
-                        } else if (dx > 0) {
-                            if (ddx < curR.width * 0.15) continue;
-                        } else if (dx < 0) {
-                            if (ddx > -curR.width * 0.15) continue;
-                        }
-
-                        // 评分：主方向距离 + 偏移方向距离 * 2
-                        var primary, secondary;
-                        if (dy !== 0) {
-                            primary = Math.abs(ddy);
-                            secondary = Math.abs(ddx);
-                        } else {
-                            primary = Math.abs(ddx);
-                            secondary = Math.abs(ddy);
-                        }
-                        // 偏离方向超过屏幕一半就放弃
-                        if (dy !== 0 && secondary > window.innerWidth * 0.6) continue;
-                        if (dx !== 0 && secondary > window.innerHeight * 0.6) continue;
-
-                        var score = primary + secondary * 1.5;
-                        if (score < bestScore) {
-                            bestScore = score;
-                            best = it;
-                        }
-                    }
-                    return best;
-                }
-
-                function moveFocus(dx, dy) {
-                    // 轻量更新：只刷新坐标，不重新查询 DOM
-                    gatherLight();
-
-                    if (!TV.items || TV.items.length === 0) {
-                        window.scrollBy(0, dy * 200);
-                        return false;
-                    }
-
-                    var cur = TV.current;
-                    if (cur && (!document.body.contains(cur.el) || !isVisible(cur.el))) {
-                        cur = null;
-                        TV.current = null;
-                    }
-
-                    if (!cur) {
-                        var cx = window.innerWidth / 2;
-                        var cy = window.innerHeight / 2;
-                        var best = null, bestD = Infinity;
-                        TV.items.forEach(function(it) {
-                            var d = Math.hypot(it.x - cx, it.y - cy);
-                            if (d < bestD) { bestD = d; best = it; }
-                        });
-                        if (best) {
-                            TV.current = best;
-                            best.el.scrollIntoView({ block:'center', inline:'nearest' });
-                            setTimeout(drawBox, 60);
-                        }
-                        return true;
-                    }
-
-                    var next = findGridNeighbor(cur, dx, dy) || findNearestInDirection(cur, dx, dy);
-
-                    if (!next) {
-                        // 没找到：如果是向下且当前是视频，尝试滚动
-                        if (dy > 0 && cur.type === 'video') {
-                            window.scrollBy({ top: window.innerHeight * 0.7, behavior: 'auto' });
-                            setTimeout(function() {
-                                gather();
-                                gatherLight();
-                                var nxt = findNearestInDirection(TV.current, 0, 1);
-                                if (nxt) {
-                                    TV.current = nxt;
-                                    nxt.el.scrollIntoView({ block:'center' });
-                                    setTimeout(drawBox, 60);
-                                } else {
-                                    drawBox();
-                                }
-                            }, 500);
-                            return true;
-                        }
-                        drawBox();
-                        return false;
-                    }
-
-                    TV.current = next;
-                    next.el.scrollIntoView({ block:'nearest', inline:'nearest' });
-                    setTimeout(drawBox, 60);
-                    return true;
-                }
-                TV.move = moveFocus;
-
-                function activate() {
-                    if (!TV.current) { moveFocus(0, 0); return 'init'; }
-                    var item = TV.current;
-                    var el = item.el;
-                    if (!document.body.contains(el)) {
-                        console.log('[TV] current el detached, refresh & reselect');
-                        TV.current = null;
-                        moveFocus(0, 0);
-                        return 'reset';
-                    }
-                    console.log('[TV] activate ' + item.type + ': ' + item.name);
-
-                    if (item.type === 'video') {
-                        // 视频卡片：发送 pointer/mouse/click 事件链，兼容抖音 SPA 的点击路由。
-                        var selectedVideo = item.videoEl || null;
-                        if (!selectedVideo) selectedVideo = findVideoForElement(el);
-                        if (playFullscreenVideo(selectedVideo)) {
-                            showLabel('▶ 全屏播放: ' + item.name);
-                            return 'video-fullscreen';
-                        }
-                        openItem(item);
-                        showLabel('▶ 打开: ' + item.name);
-                        // 页面跳转后重置焦点
-                        setTimeout(function() {
-                            TV.current = null;
-                        }, 1500);
-                        return 'video-clicked';
-                    }
-
-                    // 顶部 tab / 左侧菜单
-                    var inner = getActionTarget(el);
-                    var beforeHref = location.href;
-                    fireRemoteClick(inner);
-                    setTimeout(function() {
-                        var href = inner && inner.getAttribute ? inner.getAttribute('href') : '';
-                        if (href && location.href === beforeHref) {
-                            try { location.href = href; } catch(e) {}
-                        }
-                    }, 120);
-
-                    showLabel('✓ ' + item.name);
-                    // 分类切换后，等 DOM 刷新后自动跳到第一个视频
-                    setTimeout(function() {
-                        gather();
-                        gatherLight();
-                        var videos = TV.items.filter(function(i) { return i.type === 'video'; });
-                        if (videos.length > 0 && (item.type === 'leftnav' || item.type === 'toptab')) {
-                            TV.current = null;
-                        }
-                    }, 500);
-                    return 'clicked';
-                }
-                TV.activate = activate;
-
-                // 节流的 DOM 变化监听
-                var refreshTimer;
-                var observer = new MutationObserver(function() {
-                    clearTimeout(refreshTimer);
-                    refreshTimer = setTimeout(function() {
-                        gather();
-                        if (TV.current && document.body.contains(TV.current.el)) {
-                            drawBox();
-                        }
-                    }, 900);
-                });
-                observer.observe(document.body, { childList:true, subtree:true });
-                TV.observer = observer;
-
-                var scrollTimer;
-                var scrollHandler = function() {
-                    clearTimeout(scrollTimer);
-                    scrollTimer = setTimeout(function() {
-                        if (TV.current) drawBox();
-                    }, 16);
-                };
-                window.addEventListener('scroll', scrollHandler, { passive:true, capture:true });
-                document.addEventListener('scroll', scrollHandler, { passive:true, capture:true });
-                TV.scrollHandler = scrollHandler;
-
-                // 定期全量刷新（每 5 秒），保证新出现的视频卡片被加入
-                TV.refreshInterval = setInterval(function() { gather(); }, 8000);
-
-                var resizeHandler = function() {
-                    gather();
-                    if (TV.current) drawBox();
-                };
-                window.addEventListener('resize', resizeHandler);
-                TV.resizeHandler = resizeHandler;
-
-                TV.cleanup = function() {
-                    try { observer.disconnect(); } catch(e) {}
-                    try { window.removeEventListener('scroll', scrollHandler); } catch(e) {}
-                    try { document.removeEventListener('scroll', scrollHandler); } catch(e) {}
-                    try { window.removeEventListener('resize', resizeHandler); } catch(e) {}
-                    try { clearInterval(TV.refreshInterval); } catch(e) {}
-                    try { hl.remove(); label.remove(); } catch(e) {}
-                };
-
-                // 启动
-                gather();
-                setTimeout(function() {
-                    moveFocus(0, 0);
-                }, 300);
-
-                return 'ok:' + TV.items.length;
-            })();
-        """.trimIndent()
+        val script = assets.open("browser-extension/focus-engine.js").bufferedReader().use {
+            it.readText()
+        }
 
         webView.evaluateJavascript(script) { result ->
             Log.d(tag, "Focus engine init: $result")
@@ -1410,6 +684,10 @@ class MainActivity : AppCompatActivity() {
     private fun focusEngineNavigate(dx: Int, dy: Int) {
         val script = """
             (function() {
+                if (window.__tvFocus && window.__tvFocus.hasModal()) {
+                    window.__tvFocus.move($dx,$dy);
+                    return 'dialog-focus';
+                }
                 var fullscreenVideo = document.querySelector('video.tv-pseudo-fullscreen-video');
                 if (fullscreenVideo) {
                     if ($dx !== 0) {
@@ -1439,7 +717,7 @@ class MainActivity : AppCompatActivity() {
                     return best;
                 }
                 var href = location.href;
-                var inVideoPage = href.indexOf('/video/') > -1 || href.indexOf('/note/') > -1 || document.querySelectorAll('video').length === 1;
+                var inVideoPage = href.indexOf('/video/') > -1 || href.indexOf('/note/') > -1;
                 if (inVideoPage) {
                     var v = primaryVideo();
                     if (v && $dx !== 0) {
@@ -1468,6 +746,10 @@ class MainActivity : AppCompatActivity() {
     private fun focusEngineAction() {
         val script = """
             (function() {
+                if (window.__tvFocus && window.__tvFocus.hasModal()) {
+                    window.__tvFocus.activate();
+                    return 'dialog-action';
+                }
                 var fullscreenVideo = document.querySelector('video.tv-pseudo-fullscreen-video');
                 if (fullscreenVideo) {
                     try {
@@ -1536,7 +818,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun tryExitVideoFullscreen(): Boolean {
         if (customVideoView != null) {
-            webView.webChromeClient?.onHideCustomView()
+            douyinWebChromeClient.onHideCustomView()
             return true
         }
         if (!isPseudoVideoFullscreen) return false
@@ -1686,7 +968,7 @@ class MainActivity : AppCompatActivity() {
             webView.apply {
                 loadDataWithBaseURL(null, "", "text/html", "utf-8", null)
                 clearHistory()
-                clearCache(true)
+                // 保留磁盘资源缓存，避免下次启动重新下载网页脚本和图片。
                 removeAllViews()
                 destroy()
             }

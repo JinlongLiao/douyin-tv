@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 仅用于启动图标与电视桌面横幅，不改变应用主题配色。 -->
+    <color name="launcher_background">#101117</color>
+</resources>
