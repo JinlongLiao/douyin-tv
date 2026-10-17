@@ -2,11 +2,17 @@
 (function () {
     'use strict';
 
-    /** 选择当前可见面积最大的视频，排除隐藏和已经滑出视口的节点。 */
+    /**
+     * 播放弹层内只选择激活播放器，避免其加载阶段误选仍有尺寸的背景直播预览。
+     * 主视频尚未显示时仍返回该节点，让调用方报告未就绪；普通页面按可见面积选择。
+     */
     function findVisibleVideo() {
+        var modal = findBrowserPlaybackModal();
+        var scope = modal ? (findBrowserActivePlayer(modal) || modal) : document;
+        var videos = scope.querySelectorAll('video');
         var selected = null;
         var selectedArea = 0;
-        document.querySelectorAll('video').forEach(function (video) {
+        videos.forEach(function (video) {
             var rect = video.getBoundingClientRect();
             var width = Math.max(0, Math.min(innerWidth, rect.right) - Math.max(0, rect.left));
             var height = Math.max(0, Math.min(innerHeight, rect.bottom) - Math.max(0, rect.top));
@@ -15,7 +21,7 @@
                 selected = video;
             }
         });
-        return selected;
+        return selected || (scope !== document && videos.length ? videos[0] : null);
     }
 
     /** 关闭网站实际显示的登录弹窗；鼠标导航不再安装空间焦点引擎。 */
@@ -36,8 +42,9 @@
     /** 使用实机播放器切换箭头，列表页按 data-aweme-id 切换卡片；没有目标时明确返回失败。 */
     function switchBrowserVideo(direction) {
         // 网站会预加载邻居视频，并隐藏控制条；只操作激活播放器，不要求按钮当前可见。
-        var activePlayer = document.querySelector('[data-e2e="feed-active-video"]');
-        var arrow = (activePlayer || document).querySelector(direction > 0 ?
+        var modal = findBrowserPlaybackModal();
+        var activePlayer = findBrowserActivePlayer(modal);
+        var arrow = (activePlayer || modal || document).querySelector(direction > 0 ?
             '[data-e2e="video-switch-next-arrow"]' : '[data-e2e="video-switch-prev-arrow"]');
         if (arrow && arrow.getAttribute('aria-disabled') !== 'true') {
             arrow.click();
@@ -64,12 +71,12 @@
     function performRemoteCommand(command) {
         if (command.action === 'back' || command.action === 'exit-video') {
             if (dismissBrowserDialog()) return 'dialog-closed';
-            var videoModal = document.querySelector('[data-e2e="modal-video-container"]');
+            var videoModal = findBrowserPlaybackModal();
             if (videoModal) {
                 var modalBounds = videoModal.getBoundingClientRect();
                 if (modalBounds.width > 0 && modalBounds.height > 0) {
                     // 实机关闭按钮在弹层外的同级宿主，无 aria-label/data-e2e；已验证该点击回到原列表。
-                    var modalClose = document.querySelector('.o7hAjQkB');
+                    var modalClose = findBrowserPlaybackCloseButton(videoModal);
                     if (modalClose) { modalClose.click(); return 'video-modal-closed'; }
                     // 网站改版找不到关闭按钮时保留播放页，绝不把全屏返回降级为退出应用。
                     return 'video-close-not-found';

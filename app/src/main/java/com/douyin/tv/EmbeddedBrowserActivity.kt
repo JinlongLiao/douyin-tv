@@ -27,6 +27,7 @@ import com.douyin.tv.ui.BrowserPlaybackOverlay
 import com.douyin.tv.ui.BrowserPointerView
 import com.douyin.tv.utils.BrowserIdentity
 import com.douyin.tv.utils.EmbeddedBrowserRuntime
+import com.douyin.tv.utils.BrowserStartupRecoveryState
 import org.json.JSONObject
 import org.mozilla.geckoview.GeckoResult
 import org.mozilla.geckoview.GeckoSession
@@ -59,6 +60,10 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
     private var isPageOverlayStateKnown = false
     /** 浏览器导航回调确认的首页位置，不包含仍带 modal_id 的播放器。 */
     private var isRootBrowserLocation = false
+    /** 首次分流恢复仅在当前会话消费一次，不接管用户后续导航。 */
+    private val browserStartupRecoveryState = BrowserStartupRecoveryState()
+    /** 最近顶层导航位置；仅用于在成功落地后识别启动下载页。 */
+    private var latestBrowserLocation: Uri? = null
     /** 当前方向键是否操作视频；默认鼠标模式，进入播放器时自动切换。 */
     private val playbackControlMode: Boolean
         get() = browserControlModeState.playbackControlMode
@@ -138,8 +143,7 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
                 val now = SystemClock.uptimeMillis()
                 if (rootExitHintTime != 0L && now - rootExitHintTime <= 2000 &&
                     !isVideoFullscreen && !isPageVideoModalActive && !hasPageLoginDialog) {
-                    Log.i(TAG, "Root exit confirmed")
-                    finish()
+                    moveBrowserTaskToBackground()
                     return
                 }
                 rootExitHintTime = 0L
@@ -174,6 +178,7 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
             override fun onLocationChange(session: GeckoSession, url: String?,
                 perms: List<GeckoSession.PermissionDelegate.ContentPermission>, hasUserGesture: Boolean) {
                 val location = url?.let { Uri.parse(it) }
+                latestBrowserLocation = location
                 isRootBrowserLocation = (location?.host == "www.douyin.com" || location?.host == "douyin.com") &&
                     (location.path == "/jingxuan" || location.path == "/") &&
                     !location.queryParameterNames.contains("modal_id")
@@ -216,6 +221,12 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
             override fun onPageStop(session: GeckoSession, success: Boolean) {
                 progressBar.visibility = View.GONE
                 Log.i(TAG, "Gecko page stop: success=$success")
+                if (browserStartupRecoveryState.shouldRetryStartupHome(
+                        latestBrowserLocation?.host, latestBrowserLocation?.path, success)) {
+                    // 首次下载页已完成站点初始化，实机复测重新请求原首页可正常进入；最多一次。
+                    Log.i(TAG, "Retry startup home after download landing: $latestBrowserLocation")
+                    session.loadUri(HOME_URL)
+                }
             }
         }
         geckoSession.contentDelegate = object : GeckoSession.ContentDelegate {
@@ -326,7 +337,10 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
                 if (message.optString("result") == "video-close-not-found") {
                     showBrowserHint("请用光标点击播放器左上角返回；已保留当前播放界面", Toast.LENGTH_LONG)
                 }
-                if (message.optString("result") in arrayOf("video-switch-not-found", "video-not-found", "video-not-seekable")) {
+                if (message.optString("result") == "video-not-seekable") {
+                    showBrowserHint("视频正在加载或不支持快进，请稍后再试", Toast.LENGTH_SHORT)
+                }
+                if (message.optString("result") in arrayOf("video-switch-not-found", "video-not-found")) {
                     showBrowserHint("当前页面没有可操作的视频或相邻视频，请切回鼠标模式选择", Toast.LENGTH_SHORT)
                 }
             }
@@ -358,7 +372,7 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
     }
 
     /**
-     * 弹窗和全屏均未消费返回后，先回退历史；主页面首次提示，连续第二次才退出。
+     * 弹窗和全屏均未消费返回后，先回退历史；主页面首次提示，连续第二次退到桌面保留页面。
      * @param repeatedRootBack 网页繁忙期间是否已收到两秒内的第二次返回，仅主页面可以消费该退出意图。
      * @param atRootPage 扩展是否已确认当前为首页，避免 SPA 残留历史绕过首页二次返回规则。
      */
@@ -368,13 +382,30 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
             geckoSession.goBack()
         } else {
             if (repeatedRootBack) {
-                Log.i(TAG, "Root exit confirmed after queued double back")
-                finish()
+                moveBrowserTaskToBackground()
                 return
             }
             rootExitHintTime = SystemClock.uptimeMillis()
             Log.i(TAG, "Root exit hint shown")
             showBrowserHint("再按一次返回退出", Toast.LENGTH_SHORT)
+        }
+    }
+
+    /**
+     * 首页双返回确认后将已有任务移到后台，保留网页、会话和光标以便快速重开。
+     * onPause 随后将会话设为 inactive，由内核降低后台内存及渲染活动；系统仍可回收进程。
+     * 移动任务失败时才关闭当前 Activity，避免第二次返回没有任何反馈。
+     *
+     * @see <a href="https://developer.android.com/reference/android/app/Activity#moveTaskToBack(boolean)">Android 后台任务移动契约</a>
+     */
+    private fun moveBrowserTaskToBackground() {
+        rootExitHintTime = 0L
+        repeatedBackWhilePending = false
+        browserHintToast?.cancel()
+        Log.i(TAG, "Root exit confirmed; retaining browser task in background")
+        if (!moveTaskToBack(true)) {
+            Log.w(TAG, "Unable to move browser task to background; closing activity")
+            finish()
         }
     }
 
@@ -574,7 +605,7 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
         progressBar.visibility = View.GONE
     }
 
-    /** Activity 隐藏时暂停会话活动，避免后台浏览继续占用视频与页面资源。 */
+    /** Activity 隐藏时停止光标并将会话设为 inactive，由内核降低后台渲染及内存占用。 */
     override fun onPause() {
         if (::browserPointerView.isInitialized) browserPointerView.stopPointerMovement()
         Log.i(TAG, "Gecko activity paused")
@@ -585,6 +616,8 @@ class EmbeddedBrowserActivity : AppCompatActivity() {
     /** Activity 恢复时重新激活当前会话，不重新加载网页或清除资料。 */
     override fun onResume() {
         super.onResume()
+        // 重开后的首次返回必须重新提示，不能继承刚退到桌面时的确认时间窗。
+        rootExitHintTime = 0L
         if (::geckoSession.isInitialized) geckoSession.setActive(true)
         Log.i(TAG, "Gecko activity resumed")
     }

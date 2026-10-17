@@ -1,8 +1,8 @@
 {
   "manifest_version": 2,
   "name": "抖音电视遥控器",
-  "version": "1.0.19.0",
-  "description": "为应用内置浏览器提供电视遥控器空间导航。",
+  "version": "1.0.20.0",
+  "description": "为应用内置浏览器提供电视播放控制、返回处理和状态同步。",
   "browser_specific_settings": { "gecko": { "id": "tv-remote@douyin-tv.local" } },
   "permissions": ["nativeMessaging", "nativeMessagingFromContent", "geckoViewAddons"],
   "content_scripts": [{
@@ -14,7 +14,7 @@
     "matches": ["https://www.douyin.com/*", "https://douyin.com/*"],
     "run_at": "document_idle",
     "all_frames": false,
-    "js": ["native-bridge.js", "remote-controls.js", "playback-context.js"],
+    "js": ["native-bridge.js", "playback-scope.js", "remote-controls.js", "playback-context.js"],
     "css": ["tv.css"]
   }]
 }

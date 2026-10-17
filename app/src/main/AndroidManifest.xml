@@ -47,11 +47,12 @@
             </intent-filter>
         </activity>
         
-        <!-- 内置新内核验证入口，仍由应用自己的启动 Activity 路由。 -->
+        <!-- 启动页重复转交时复用唯一浏览器，避免后台会话堆积并重复加载整站脚本。 -->
         <activity
             android:name=".EmbeddedBrowserActivity"
             android:configChanges="orientation|screenSize|keyboardHidden|screenLayout|smallestScreenSize"
             android:exported="false"
+            android:launchMode="singleTask"
             android:screenOrientation="landscape"
             android:windowSoftInputMode="stateUnspecified|adjustResize" />
 
